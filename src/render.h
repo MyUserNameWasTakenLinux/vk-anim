@@ -19,6 +19,9 @@ vk::Device device {};
 size_t graphics_qf_index {};
 vk::Queue graphics_queue {};
 vk::SurfaceKHR surface {};
+vk::SwapchainKHR swapchain {};
+std::vector<vk::Image> swapchain_images {}; // Image memory handled by the swapchain
+std::vector<vk::ImageView> swapchain_image_views {};
 
 public:
     Render(int width, int height, std::string name);
@@ -27,6 +30,7 @@ public:
 private:
     void init_window();
     void init_vulkan();
+    void init_swapchain();
 };
 
 class Scene {

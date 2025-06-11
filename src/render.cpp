@@ -1,8 +1,13 @@
 #include "render.h"
 #include <algorithm>
+#include <limits>
 
 const std::vector<const char*> validation_layers = {
     "VK_LAYER_KHRONOS_validation"
+};
+
+const std::vector<const char*> device_extensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
 
 const bool enable_validation_layers = true;
@@ -29,6 +34,7 @@ bool check_validation_layer_support() {
 Render::Render(int width, int height, std::string name) : width(width), height(height), name(name) {
     init_window();
     init_vulkan();
+    init_swapchain();
 
     while(!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -37,7 +43,12 @@ Render::Render(int width, int height, std::string name) : width(width), height(h
 
 Render::~Render() {
 
+    for(auto& iv : swapchain_image_views) {
+        device.destroyImageView(iv);
+    }
+    device.destroySwapchainKHR(swapchain);
     device.destroy();
+    instance.destroySurfaceKHR(surface);
     instance.destroy();
     glfwDestroyWindow(window);
     glfwTerminate();
@@ -82,7 +93,18 @@ void Render::init_vulkan() {
 
     float queue_priority = 0.0f;
     vk::DeviceQueueCreateInfo queue_info(vk::DeviceQueueCreateFlags(), static_cast<uint32_t>(graphics_qf_index), 1, &queue_priority);
-    device = phys_device.createDevice(vk::DeviceCreateInfo(vk::DeviceCreateFlags(), queue_info));
+    auto available_extensions = phys_device.enumerateDeviceExtensionProperties();
+    bool swapchain_support = false;
+    for(auto extension : available_extensions) {
+        if(std::string(extension.extensionName) == std::string(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+            swapchain_support = true;
+        }
+    }
+    if(swapchain_support == false) {
+        std::cerr << "Swapchain extension not supported by device\n";
+        std::exit(EXIT_FAILURE);
+    }
+    device = phys_device.createDevice(vk::DeviceCreateInfo(vk::DeviceCreateFlags(), queue_info, {}, device_extensions));
 
     graphics_queue = device.getQueue(graphics_qf_index, 0);
 
@@ -92,5 +114,75 @@ void Render::init_vulkan() {
         surface = vk::SurfaceKHR(_surface);
     }
 
+    if(!phys_device.getSurfaceSupportKHR(static_cast<uint32_t>(graphics_qf_index), surface)) {
+        std::cerr << "Graphics queue doesn't support present (TODO: fix)\n";
+        std::exit(EXIT_FAILURE);
+    }
     
+}
+
+void Render::init_swapchain() {
+    auto physical_device = instance.enumeratePhysicalDevices().front(); // May be dangerous (deterministic?)
+    std::vector<vk::SurfaceFormatKHR> formats = physical_device.getSurfaceFormatsKHR(surface);
+    vk::Format format = (formats[0].format == vk::Format::eUndefined) ? vk::Format::eB8G8R8A8Unorm : formats[0].format;
+    vk::SurfaceCapabilitiesKHR surface_capabilities = physical_device.getSurfaceCapabilitiesKHR(surface);
+    vk::Extent2D swapchain_extent;
+
+    if(surface_capabilities.currentExtent.width == (std::numeric_limits<uint32_t>::max)()) {
+        swapchain_extent.width = std::clamp(static_cast<uint32_t>(width), surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width);
+        swapchain_extent.height = std::clamp(static_cast<uint32_t>(height), surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height);
+    } else {
+        swapchain_extent = surface_capabilities.currentExtent;
+    }
+
+    vk::PresentModeKHR swapchain_present_mode = vk::PresentModeKHR::eFifo;
+
+    vk::SurfaceTransformFlagBitsKHR pre_transform = (surface_capabilities.supportedTransforms & vk::SurfaceTransformFlagBitsKHR::eIdentity)
+    ? vk::SurfaceTransformFlagBitsKHR::eIdentity : surface_capabilities.currentTransform;
+
+    vk::CompositeAlphaFlagBitsKHR composite_alpha;
+    // Order of preferences
+    if(surface_capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::ePreMultiplied) {
+        composite_alpha = vk::CompositeAlphaFlagBitsKHR::ePreMultiplied; // Done by application
+    } else if(surface_capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::ePostMultiplied) {
+        composite_alpha = vk::CompositeAlphaFlagBitsKHR::ePostMultiplied; // Done by compositor
+    } else if(surface_capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eInherit) {
+        composite_alpha = vk::CompositeAlphaFlagBitsKHR::eInherit;
+    } else {
+        composite_alpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
+    }
+
+    uint32_t image_count;
+    if(surface_capabilities.maxImageCount == 0) {
+        image_count = std::max(3u, surface_capabilities.minImageCount);
+    } else {
+        image_count = std::clamp(3u, surface_capabilities.minImageCount, surface_capabilities.maxImageCount);
+    }
+
+    vk::SwapchainCreateInfoKHR create_info(
+        vk::SwapchainCreateFlagsKHR(),
+        surface,
+        image_count,
+        format,
+        vk::ColorSpaceKHR::eSrgbNonlinear,
+        swapchain_extent,
+        1,
+        vk::ImageUsageFlagBits::eColorAttachment,
+        vk::SharingMode::eExclusive,
+        {},
+        pre_transform,
+        composite_alpha,
+        swapchain_present_mode,
+        true,
+        nullptr
+    );
+
+    swapchain = device.createSwapchainKHR(create_info);
+    swapchain_images = device.getSwapchainImagesKHR(swapchain);
+    swapchain_image_views.reserve(swapchain_images.size());
+    vk::ImageViewCreateInfo iv_create_info({}, {}, vk::ImageViewType::e2D, format, {}, {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
+    for(auto image : swapchain_images) {
+        iv_create_info.image = image;
+        swapchain_image_views.push_back(device.createImageView(iv_create_info));
+    }
 }
