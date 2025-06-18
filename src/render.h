@@ -22,6 +22,16 @@ vk::SurfaceKHR surface {};
 vk::SwapchainKHR swapchain {};
 std::vector<vk::Image> swapchain_images {}; // Image memory handled by the swapchain
 std::vector<vk::ImageView> swapchain_image_views {};
+struct {
+    vk::Image image {};
+    vk::DeviceMemory memory {};
+    vk::ImageView image_view {};
+} depth_buffer;
+
+struct {
+    vk::Buffer buffer {};
+    vk::DeviceMemory memory {};
+} uniform_buffer;
 
 public:
     Render(int width, int height, std::string name);
@@ -31,6 +41,8 @@ private:
     void init_window();
     void init_vulkan();
     void init_swapchain();
+    void init_depth_buffer();
+    void init_uniform_buffer();
 };
 
 class Scene {

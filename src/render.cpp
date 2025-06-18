@@ -1,6 +1,7 @@
 #include "render.h"
 #include <algorithm>
 #include <limits>
+#include <glm/glm.hpp>
 
 const std::vector<const char*> validation_layers = {
     "VK_LAYER_KHRONOS_validation"
@@ -35,6 +36,7 @@ Render::Render(int width, int height, std::string name) : width(width), height(h
     init_window();
     init_vulkan();
     init_swapchain();
+    init_depth_buffer();
 
     while(!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -43,6 +45,11 @@ Render::Render(int width, int height, std::string name) : width(width), height(h
 
 Render::~Render() {
 
+    device.destroyBuffer(uniform_buffer.buffer);
+    device.freeMemory(uniform_buffer.memory);
+    device.destroyImageView(depth_buffer.image_view);
+    device.destroyImage(depth_buffer.image);
+    device.freeMemory(depth_buffer.memory);
     for(auto& iv : swapchain_image_views) {
         device.destroyImageView(iv);
     }
@@ -185,4 +192,90 @@ void Render::init_swapchain() {
         iv_create_info.image = image;
         swapchain_image_views.push_back(device.createImageView(iv_create_info));
     }
+}
+
+void Render::init_depth_buffer() {
+    auto physical_device = instance.enumeratePhysicalDevices().front(); // May be dangerous (deterministic?)
+    vk::Format depth_format = vk::Format::eD16Unorm;
+    vk::FormatProperties format_properties = physical_device.getFormatProperties(depth_format);
+
+    vk::ImageTiling tiling;
+    if(format_properties.linearTilingFeatures & vk::FormatFeatureFlagBits::eDepthStencilAttachment) {
+        tiling = vk::ImageTiling::eLinear;
+    } else if(format_properties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eDepthStencilAttachment) {
+        tiling = vk::ImageTiling::eOptimal;
+    } else {
+        std::cerr << "DepthStencilAttachment not supported for format D16Unorm\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    vk::ImageCreateInfo create_info(
+        vk::ImageCreateFlags(),
+        vk::ImageType::e2D,
+        depth_format,
+        vk::Extent3D(width, height, 1),
+        1,
+        1,
+        vk::SampleCountFlagBits::e1,
+        tiling,
+        vk::ImageUsageFlagBits::eDepthStencilAttachment
+    );
+
+    depth_buffer.image = device.createImage(create_info);
+    vk::PhysicalDeviceMemoryProperties mem_prop = physical_device.getMemoryProperties();
+    vk::MemoryRequirements mem_reqs = device.getImageMemoryRequirements(depth_buffer.image);
+    uint32_t type_bits = mem_reqs.memoryTypeBits;
+    uint32_t type_index = std::numeric_limits<uint32_t>::max();
+
+    for(uint32_t i = 0; i < mem_prop.memoryTypeCount; ++i) {
+        if((type_bits & 1) && (mem_prop.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal)) {
+            type_index = i;
+            break;
+        }
+        type_bits >>= 1;
+    }
+
+    if(type_index == std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "Memory type not found\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    depth_buffer.memory = device.allocateMemory(vk::MemoryAllocateInfo(mem_reqs.size, type_index));
+    device.bindImageMemory(depth_buffer.image, depth_buffer.memory, 0);
+
+    depth_buffer.image_view = device.createImageView(vk::ImageViewCreateInfo(
+        vk::ImageViewCreateFlags(), depth_buffer.image, vk::ImageViewType::e2D, depth_format, {}, {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1}
+    ));
+
+}
+
+void Render::init_uniform_buffer() {
+    auto physical_device = instance.enumeratePhysicalDevices().front(); // May be dangerous (deterministic?)
+    uniform_buffer.buffer = device.createBuffer(vk::BufferCreateInfo(vk::BufferCreateFlags(), sizeof(glm::mat4x4) * 3, vk::BufferUsageFlagBits::eUniformBuffer));
+
+    vk::MemoryRequirements mem_reqs = device.getBufferMemoryRequirements(uniform_buffer.buffer);
+    vk::PhysicalDeviceMemoryProperties mem_props = physical_device.getMemoryProperties();
+    uint32_t type_bits = mem_reqs.memoryTypeBits;
+    uint32_t type_index = std::numeric_limits<uint32_t>::max();
+
+    for(uint32_t i = 0; i != mem_props.memoryTypeCount; ++i) {
+        if(
+            (type_bits & 1) &&
+            (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible) &&
+            (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostCoherent)
+        ) {
+            type_index = i;
+            break;
+        }
+
+        type_bits >>= 1;
+    }
+
+    if(type_index == std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "Memory type not found\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    uniform_buffer.memory = device.allocateMemory(vk::MemoryAllocateInfo(mem_reqs.size, type_index));
+    device.bindBufferMemory(uniform_buffer.buffer, uniform_buffer.memory, 0);
 }
