@@ -46,6 +46,12 @@ vk::DescriptorSet descriptor_set;
 vk::PipelineLayout pipeline_layout;
 vk::Pipeline pipeline;
 
+struct {
+    const uint32_t size = 32 * 2048; // 2048 Vertices
+    vk::Buffer buffer {};
+    vk::DeviceMemory memory {};
+} vertex_buffer;
+
 public:
     Render(int width, int height, std::string name);
     ~Render();
@@ -57,6 +63,8 @@ private:
     void init_depth_buffer();
     void init_uniform_buffer();
     void init_pipeline();
+    void init_vertex_buffer();
+    void init_command_buffer();
 };
 
 class Scene {

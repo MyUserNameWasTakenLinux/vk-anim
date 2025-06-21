@@ -454,3 +454,42 @@ void Render::init_pipeline() {
     device.destroyShaderModule(vertex_shader_module);
     device.destroyShaderModule(fragment_shader_module);
 }
+
+void Render::init_vertex_buffer() {
+    auto physical_device = instance.enumeratePhysicalDevices().front(); // May be dangerous (deterministic?)
+    vk::DeviceSize buffer_size = vertex_buffer.size;
+    vk::BufferCreateInfo buffer_info(vk::BufferCreateFlags(), buffer_size, vk::BufferUsageFlagBits::eVertexBuffer);
+    vertex_buffer.buffer = device.createBuffer(buffer_info);
+
+    vk::MemoryRequirements mem_reqs = device.getBufferMemoryRequirements(vertex_buffer.buffer);
+    
+    vk::PhysicalDeviceMemoryProperties mem_props = physical_device.getMemoryProperties();
+    uint32_t type_bits = mem_reqs.memoryTypeBits;
+    uint32_t type_index = std::numeric_limits<uint32_t>::max();
+
+    for(uint32_t i = 0; i != mem_props.memoryTypeCount; ++i) {
+        // Running on unified memory architecture so these flags are fine even in the case of vertex buffers
+        if(
+            (type_bits & 1) &&
+            (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible) &&
+            (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostCoherent)
+        ) {
+            type_index = i;
+            break;
+        }
+
+        type_bits >>= 1;
+    }
+
+    if(type_index == std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "Memory type not found\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    vertex_buffer.memory = device.allocateMemory(vk::MemoryAllocateInfo(mem_reqs.size, type_index));
+    device.bindBufferMemory(vertex_buffer.buffer, vertex_buffer.memory, 0);
+}
+
+void Render::init_command_buffer() {
+    
+}
