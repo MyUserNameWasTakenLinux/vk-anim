@@ -17,10 +17,6 @@ const std::string fragment_shader_file = "test.frag.spv";
 
 const bool enable_validation_layers = true;
 
-struct Vertex {
-    glm::vec4 position;
-    glm::vec4 color;
-};
 
 bool check_validation_layer_support() {
     std::vector<vk::LayerProperties> layers = vk::enumerateInstanceLayerProperties();
@@ -77,14 +73,167 @@ Render::Render(int width, int height, std::string name) : width(width), height(h
     init_depth_buffer();
     init_uniform_buffer();
     init_pipeline();
+    init_vertex_buffer();
+    init_command_buffer();
+}
 
+void Render::add_vobject(VObject v) {
+    if(free_vertex_mem_index >= 32 * 2048) {
+        std::cerr << "Increase vertex buffer size\n";
+        std::exit(EXIT_FAILURE);
+    }
+    auto transfer_size = sizeof(Vertex) * v.vertices.size();
+    void* data = device.mapMemory(vertex_buffer.memory, free_vertex_mem_index, transfer_size);
+    memcpy(data, v.vertices.data(), transfer_size);
+    device.unmapMemory(vertex_buffer.memory);
+
+    render_objects.push_back(RenderObject(v, (free_vertex_mem_index + transfer_size) / sizeof(Vertex)));
+}
+
+void Render::loop() {
+    image_acquired_semaphore = device.createSemaphore(vk::SemaphoreCreateInfo());
+    draw_fence = device.createFence(vk::FenceCreateInfo());
+    
     while(!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        vk::ResultValue<uint32_t> next_image = device.acquireNextImageKHR(swapchain.handle, 100000000, image_acquired_semaphore, nullptr);
+        if(next_image.result != vk::Result::eSuccess || next_image.value >= swapchain.image_views.size()) {
+            std::cerr << "Error with acquiring next image\n";
+            std::exit(EXIT_FAILURE);
+        }
+        uint32_t image_index = next_image.value;
+
+        command_buffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlags()));
+
+        std::array<vk::ClearValue, 2> clear_values;
+        clear_values[0].color = vk::ClearColorValue(0.5f, 0.2f, 0.2f, 0.2f);
+        clear_values[1].depthStencil = vk::ClearDepthStencilValue(1.0f, 0);
+
+        vk::RenderingAttachmentInfo color_attachment {};
+        color_attachment.imageView = swapchain.image_views[image_index];
+        color_attachment.imageLayout = vk::ImageLayout::eAttachmentOptimal;
+        color_attachment.loadOp = vk::AttachmentLoadOp::eClear;
+        color_attachment.storeOp = vk::AttachmentStoreOp::eStore;
+        color_attachment.clearValue = clear_values[0];
+
+        vk::RenderingAttachmentInfo depth_attachment {};
+        depth_attachment.imageView = depth_buffer.image_view;
+        depth_attachment.imageLayout = vk::ImageLayout::eDepthAttachmentOptimal;
+        depth_attachment.loadOp = vk::AttachmentLoadOp::eClear;
+        depth_attachment.storeOp = vk::AttachmentStoreOp::eStore;
+        depth_attachment.clearValue = clear_values[1];
+        
+
+        vk::RenderingInfo rendering_info {};
+        rendering_info.renderArea = vk::Rect2D({0, 0}, swapchain.extent);
+        rendering_info.layerCount = 1;
+        rendering_info.colorAttachmentCount = 1;
+        rendering_info.pColorAttachments = &color_attachment;
+        rendering_info.pDepthAttachment = &depth_attachment;
+
+        vk::ImageMemoryBarrier color_barrier {};
+        color_barrier.oldLayout = vk::ImageLayout::eUndefined;
+        color_barrier.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        color_barrier.srcAccessMask = {};
+        color_barrier.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+        color_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        color_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        color_barrier.image = swapchain.images[image_index];
+        color_barrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+        color_barrier.subresourceRange.baseMipLevel = 0;
+        color_barrier.subresourceRange.levelCount = 1;
+        color_barrier.subresourceRange.baseArrayLayer = 0;
+        color_barrier.subresourceRange.layerCount = 1;
+
+        vk::ImageMemoryBarrier depth_barrier {};
+        depth_barrier.oldLayout = vk::ImageLayout::eUndefined;
+        depth_barrier.newLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+        depth_barrier.srcAccessMask = {};
+        depth_barrier.dstAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+        depth_barrier.image = depth_buffer.image;
+        depth_barrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eDepth;
+        depth_barrier.subresourceRange.baseMipLevel = 0;
+        depth_barrier.subresourceRange.levelCount = 1;
+        depth_barrier.subresourceRange.baseArrayLayer = 0;
+        depth_barrier.subresourceRange.layerCount = 1;
+
+        std::array<vk::ImageMemoryBarrier, 2> barriers = {color_barrier, depth_barrier};
+
+        command_buffer.pipelineBarrier(
+            vk::PipelineStageFlagBits::eTopOfPipe,
+            vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
+            {},
+            nullptr,
+            nullptr,
+            barriers
+        );
+
+        command_buffer.beginRendering(rendering_info);
+
+        command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+        command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0, descriptor_set, nullptr);
+        command_buffer.bindVertexBuffers(0, vertex_buffer.buffer, {0});
+        command_buffer.setViewport(
+            0, 
+            vk::Viewport(0.0f, 0.0f, static_cast<float>(swapchain.extent.width), static_cast<float>(swapchain.extent.height), 0.0f, 1.0f)
+        );
+        command_buffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchain.extent));
+
+        for(auto ro : render_objects) {
+            command_buffer.draw(ro.vobject.vertices.size(), 1, ro.vertex_index, 0);
+        }
+
+        command_buffer.endRendering();
+
+        vk::ImageMemoryBarrier present_barrier {};
+        present_barrier.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        present_barrier.newLayout = vk::ImageLayout::ePresentSrcKHR;
+        present_barrier.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+        present_barrier.dstAccessMask = {};
+        present_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        present_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        present_barrier.image = swapchain.images[image_index];
+        present_barrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+        present_barrier.subresourceRange.baseMipLevel = 0;
+        present_barrier.subresourceRange.levelCount = 1;
+        present_barrier.subresourceRange.baseArrayLayer = 0;
+        present_barrier.subresourceRange.layerCount = 1;
+
+        command_buffer.pipelineBarrier(
+            vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            vk::PipelineStageFlagBits::eBottomOfPipe,
+            {},
+            nullptr,
+            nullptr,
+            present_barrier
+        );
+
+        command_buffer.end();
+
+        vk::PipelineStageFlags wait_dst_stage_mask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
+        vk::SubmitInfo submit_info(image_acquired_semaphore, wait_dst_stage_mask, command_buffer);
+        graphics_queue.submit(submit_info, draw_fence);
+
+        while(vk::Result::eTimeout == device.waitForFences(draw_fence, VK_TRUE, 100000000))
+            ;
+        device.resetFences(draw_fence);
+        vk::Result result = graphics_queue.presentKHR(vk::PresentInfoKHR({}, swapchain.handle, image_index));
+        if(result != vk::Result::eSuccess) {
+            std::cout << "Image present was not a success\n";
+        }
+
+        command_buffer.reset();
     }
 }
 
 Render::~Render() {
 
+    device.destroyFence(draw_fence);
+    device.destroySemaphore(image_acquired_semaphore);
+    device.destroyCommandPool(command_pool);
+    device.destroyBuffer(vertex_buffer.buffer);
+    device.freeMemory(vertex_buffer.memory);
     device.destroyPipeline(pipeline);
     device.destroyPipelineLayout(pipeline_layout);
     device.freeDescriptorSets(descriptor_pool, descriptor_set);
@@ -182,13 +331,12 @@ void Render::init_swapchain() {
     std::vector<vk::SurfaceFormatKHR> formats = physical_device.getSurfaceFormatsKHR(surface);
     swapchain.format = (formats[0].format == vk::Format::eUndefined) ? vk::Format::eB8G8R8A8Unorm : formats[0].format;
     vk::SurfaceCapabilitiesKHR surface_capabilities = physical_device.getSurfaceCapabilitiesKHR(surface);
-    vk::Extent2D swapchain_extent;
 
     if(surface_capabilities.currentExtent.width == (std::numeric_limits<uint32_t>::max)()) {
-        swapchain_extent.width = std::clamp(static_cast<uint32_t>(width), surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width);
-        swapchain_extent.height = std::clamp(static_cast<uint32_t>(height), surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height);
+        swapchain.extent.width = std::clamp(static_cast<uint32_t>(width), surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width);
+        swapchain.extent.height = std::clamp(static_cast<uint32_t>(height), surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height);
     } else {
-        swapchain_extent = surface_capabilities.currentExtent;
+        swapchain.extent = surface_capabilities.currentExtent;
     }
 
     vk::PresentModeKHR swapchain_present_mode = vk::PresentModeKHR::eFifo;
@@ -221,7 +369,7 @@ void Render::init_swapchain() {
         image_count,
         swapchain.format,
         vk::ColorSpaceKHR::eSrgbNonlinear,
-        swapchain_extent,
+        swapchain.extent,
         1,
         vk::ImageUsageFlagBits::eColorAttachment,
         vk::SharingMode::eExclusive,
@@ -364,7 +512,7 @@ void Render::init_pipeline() {
     };
 
     vk::PipelineVertexInputStateCreateInfo pipeline_vertex_input_state_create_info(vk::PipelineVertexInputStateCreateFlags(), vertex_input_binding_description, vertex_input_attribute_descriptions);
-    vk::PipelineInputAssemblyStateCreateInfo pipeline_input_assembly_state_create_info(vk::PipelineInputAssemblyStateCreateFlags(), vk::PrimitiveTopology::eLineList);
+    vk::PipelineInputAssemblyStateCreateInfo pipeline_input_assembly_state_create_info(vk::PipelineInputAssemblyStateCreateFlags(), vk::PrimitiveTopology::eLineStrip);
 
     vk::PipelineViewportStateCreateInfo pipeline_viewport_state_create_info(vk::PipelineViewportStateCreateFlags(), 1, nullptr, 1, nullptr);
 
@@ -422,6 +570,7 @@ void Render::init_pipeline() {
     vk::PipelineRenderingCreateInfo pipeline_rendering_create_info {};
     pipeline_rendering_create_info.colorAttachmentCount = 1;
     pipeline_rendering_create_info.pColorAttachmentFormats = &swapchain.format;
+    pipeline_rendering_create_info.depthAttachmentFormat = vk::Format::eD16Unorm;
 
     vk::GraphicsPipelineCreateInfo graphics_pipeline_create_info(
         vk::PipelineCreateFlags(),
@@ -491,5 +640,6 @@ void Render::init_vertex_buffer() {
 }
 
 void Render::init_command_buffer() {
-    
+    command_pool = device.createCommandPool(vk::CommandPoolCreateInfo(vk::CommandPoolCreateFlagBits::eResetCommandBuffer, graphics_qf_index));
+    command_buffer = device.allocateCommandBuffers(vk::CommandBufferAllocateInfo(command_pool, vk::CommandBufferLevel::ePrimary, 1)).front();
 }

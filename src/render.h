@@ -24,7 +24,8 @@ struct {
     vk::SwapchainKHR handle;
     std::vector<vk::Image> images {}; // Image memory handled by the swapchain
     std::vector<vk::ImageView> image_views {};
-    vk::Format format;    
+    vk::Format format;
+    vk::Extent2D extent;
 } swapchain;
 
 struct {
@@ -46,6 +47,24 @@ vk::DescriptorSet descriptor_set;
 vk::PipelineLayout pipeline_layout;
 vk::Pipeline pipeline;
 
+vk::CommandPool command_pool;
+vk::CommandBuffer command_buffer;
+
+vk::Fence draw_fence;
+vk::Semaphore image_acquired_semaphore;
+
+struct RenderObject {
+    VObject vobject;
+    uint32_t vertex_index;
+
+    RenderObject(VObject v, uint32_t i) : vobject(v), vertex_index(i) {}
+    ~RenderObject() {} 
+};
+
+uint32_t free_vertex_mem_index = 0; // In bytes
+
+std::vector<RenderObject> render_objects;
+
 struct {
     const uint32_t size = 32 * 2048; // 2048 Vertices
     vk::Buffer buffer {};
@@ -54,6 +73,8 @@ struct {
 
 public:
     Render(int width, int height, std::string name);
+    void add_vobject(VObject v);
+    void loop();
     ~Render();
 
 private:
@@ -65,8 +86,4 @@ private:
     void init_pipeline();
     void init_vertex_buffer();
     void init_command_buffer();
-};
-
-class Scene {
-
 };
