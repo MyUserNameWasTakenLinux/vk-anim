@@ -83,11 +83,12 @@ void Render::add_vobject(VObject v) {
         std::exit(EXIT_FAILURE);
     }
     auto transfer_size = sizeof(Vertex) * v.vertices.size();
-    void* data = device.mapMemory(vertex_buffer.memory, free_vertex_mem_index, transfer_size);
+    void* data = device.mapMemory(vertex_buffer.memory, free_vertex_mem_index, transfer_size); // TODO: update free_vertex_mem_index
     memcpy(data, v.vertices.data(), transfer_size);
     device.unmapMemory(vertex_buffer.memory);
 
-    render_objects.push_back(RenderObject(v, (free_vertex_mem_index + transfer_size) / sizeof(Vertex)));
+    render_objects.push_back(RenderObject(v, free_vertex_mem_index / sizeof(Vertex)));
+    free_vertex_mem_index += v.vertices.size();
 }
 
 void Render::loop() {
@@ -181,7 +182,7 @@ void Render::loop() {
         command_buffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapchain.extent));
 
         for(auto ro : render_objects) {
-            command_buffer.draw(ro.vobject.vertices.size(), 1, ro.vertex_index, 0);
+            command_buffer.draw(ro.vobject.vertices.size(), 1, ro.first_vertex, 0);
         }
 
         command_buffer.endRendering();

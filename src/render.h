@@ -55,9 +55,9 @@ vk::Semaphore image_acquired_semaphore;
 
 struct RenderObject {
     VObject vobject;
-    uint32_t vertex_index;
+    uint32_t first_vertex;
 
-    RenderObject(VObject v, uint32_t i) : vobject(v), vertex_index(i) {}
+    RenderObject(VObject v, uint32_t i) : vobject(v), first_vertex(i) {}
     ~RenderObject() {} 
 };
 
