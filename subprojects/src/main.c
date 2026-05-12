@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <vulkan/vk_platform.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -9,11 +10,18 @@
 #define NUM_ELEMENTS 256
 #define ELEMENT_SIZE 4
 
+#define SHADER_PATH "compute.spv"
+
 #define ERR(func, msg)                                                         \
   if (func != VK_SUCCESS) {                                                    \
     printf(msg);                                                               \
     exit(EXIT_FAILURE);                                                        \
   }
+
+typedef struct ShaderTuple {
+  uint32_t *code;
+  size_t code_size;
+} ShaderTuple;
 
 VkInstance instance;
 VkPhysicalDevice physical_device;
@@ -26,6 +34,33 @@ VkBuffer device_buffer;
 VkDeviceMemory input_buffer_memory;
 VkDeviceMemory output_buffer_memory;
 VkDeviceMemory device_buffer_memory;
+VkShaderModule shader_module;
+
+
+ShaderTuple read_shader(const char* path) {
+  FILE *f = fopen(path, "rb");
+  if(!f) {
+    printf("Could not open file\n");
+    exit(EXIT_FAILURE);
+  }
+
+  fseek(f, 0, SEEK_END);
+  size_t file_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  void *d = malloc(file_size);
+  if(!d) {
+    fclose(f);
+    printf("Could not allocate enough memory for file\n");
+    exit(EXIT_FAILURE);
+  }
+
+  size_t bytes_read = fread(d, 1, file_size, f);
+  fclose(f);
+
+  ShaderTuple tuple = {(uint32_t *) d, bytes_read};
+  return tuple;
+}
 
 void create_instance() {
   VkInstanceCreateInfo info = {};
@@ -221,7 +256,20 @@ void bind_memory() {
   ERR(vkBindBufferMemory(device, device_buffer, device_buffer_memory, 0), "Could not bind memory for device buffer\n")
 }
 
+void create_shader_module() {
+  ShaderTuple t = read_shader(SHADER_PATH);
+
+  VkShaderModuleCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  info.codeSize = t.code_size;
+  info.pCode = t.code;
+
+  ERR(vkCreateShaderModule(device, &info, NULL, &shader_module), "Could not create shader module\n");
+  free(t.code);
+}
+
 void cleanup() {
+  vkDestroyShaderModule(device, shader_module, NULL);
   vkFreeMemory(device, input_buffer_memory, NULL);
   vkFreeMemory(device, output_buffer_memory, NULL);
   vkFreeMemory(device, device_buffer_memory, NULL);
@@ -240,6 +288,7 @@ int main(void) {
   create_buffers();
   allocate_memory();
   bind_memory();
+  create_shader_module();
 
   cleanup();
 
