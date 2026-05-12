@@ -38,6 +38,10 @@ VkShaderModule shader_module;
 VkDescriptorSetLayout descriptor_set_layout;
 VkPipelineLayout pipeline_layout;
 VkPipeline compute_pipeline;
+VkDescriptorPool descriptor_pool;
+VkDescriptorSet descriptor_set;
+VkCommandPool command_pool;
+VkCommandBuffer command_buffer;
 
 ShaderTuple read_shader(const char *path) {
   FILE *f = fopen(path, "rb");
@@ -204,8 +208,9 @@ void allocate_memory() {
     const uint32_t bit_select = (1 << i);
     if (bit_select & o_buffer_requirements.memoryTypeBits &&
         memory_properties.memoryTypes[i].propertyFlags &
-            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT &&
+        memory_properties.memoryTypes[i].propertyFlags &
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
       output_mem_index = i;
       break;
     }
@@ -223,8 +228,9 @@ void allocate_memory() {
     const uint32_t bit_select = (1 << i);
     if (bit_select & d_buffer_requirements.memoryTypeBits &&
         memory_properties.memoryTypes[i].propertyFlags &
-            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT &&
+        memory_properties.memoryTypes[i].propertyFlags &
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
       device_mem_index = i;
       break;
     }
@@ -296,8 +302,44 @@ void create_descriptor_set_layout() {
 }
 
 void allocate_descriptor_set() {
-  printf("TODO\n");
-  exit(EXIT_FAILURE);
+  VkDescriptorPoolSize pool_size;
+  pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  pool_size.descriptorCount = 1;
+  VkDescriptorPoolCreateInfo pool_info = {};
+  pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  pool_info.poolSizeCount = 1;
+  pool_info.maxSets = 2; // Careful hardcoded
+  pool_info.pPoolSizes = &pool_size;
+
+  ERR(vkCreateDescriptorPool(device, &pool_info, NULL, &descriptor_pool),
+      "Could not create descriptor pool\n")
+
+  VkDescriptorSetAllocateInfo allocate_info = {};
+  allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  allocate_info.descriptorPool = descriptor_pool;
+  allocate_info.descriptorSetCount = 1;
+  allocate_info.pSetLayouts = &descriptor_set_layout;
+
+  ERR(vkAllocateDescriptorSets(device, &allocate_info, &descriptor_set),
+      "Could not allocate descriptor sets\n")
+}
+
+void write_descriptor_set() {
+  VkDescriptorBufferInfo buffer_info = {};
+  buffer_info.buffer = device_buffer;
+  buffer_info.offset = 0;
+  buffer_info.range = VK_WHOLE_SIZE;
+
+  VkWriteDescriptorSet descriptor_write = {};
+  descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  descriptor_write.dstSet = descriptor_set;
+  descriptor_write.dstBinding = 0;
+  descriptor_write.dstArrayElement = 0;
+  descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  descriptor_write.descriptorCount = 1;
+  descriptor_write.pBufferInfo = &buffer_info;
+
+  vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, NULL);
 }
 
 void create_compute_pipeline() {
@@ -326,9 +368,128 @@ void create_compute_pipeline() {
       "Could not create compute pipeline\n")
 }
 
+void allocate_command_buffers() {
+  VkCommandPoolCreateInfo pool_info = {};
+  pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+  pool_info.queueFamilyIndex = queue_index;
+
+  ERR(vkCreateCommandPool(device, &pool_info, NULL, &command_pool),
+      "Could not create command pool\n")
+
+  VkCommandBufferAllocateInfo allocate_info = {};
+  allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocate_info.commandBufferCount = 1;
+  allocate_info.commandPool = command_pool;
+  allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+
+  ERR(vkAllocateCommandBuffers(device, &allocate_info, &command_buffer),
+      "Could not allocate command buffer\n")
+}
+
+void record_commands() {
+  VkCommandBufferBeginInfo begin_info = {};
+  begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+  ERR(vkBeginCommandBuffer(command_buffer, &begin_info),
+      "Could not begin recording commands\n")
+
+  VkBufferCopy htd_buffer_region = {};
+  htd_buffer_region.dstOffset = 0;
+  htd_buffer_region.srcOffset = 0;
+  htd_buffer_region.size = NUM_ELEMENTS * ELEMENT_SIZE;
+
+  vkCmdCopyBuffer(command_buffer, input_buffer, device_buffer, 1,
+                  &htd_buffer_region);
+
+  // Block compute, wait for copy
+  VkBufferMemoryBarrier input_barrier = {};
+  input_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  input_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  input_barrier.dstAccessMask =
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  input_barrier.buffer = device_buffer;
+  input_barrier.size = VK_WHOLE_SIZE;
+
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 1,
+                       &input_barrier, 0, NULL);
+
+  vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    compute_pipeline);
+  vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          pipeline_layout, 0, 1, &descriptor_set, 0, NULL);
+  vkCmdDispatch(command_buffer, 1, 1, 1); // Careful hardcoded
+
+  // Block copy, wait for compute
+  VkBufferMemoryBarrier device_barrier = {};
+  device_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+  device_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  device_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  device_barrier.buffer = device_buffer;
+  device_barrier.size = VK_WHOLE_SIZE;
+  device_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  device_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+                       &device_barrier, 0, NULL);
+
+  vkCmdCopyBuffer(command_buffer, device_buffer, output_buffer, 1,
+                  &htd_buffer_region);
+
+  ERR(vkEndCommandBuffer(command_buffer), "Could not end recording commands\n")
+}
+
+void fill_input_buffer() {
+  void *input_ptr;
+  vkMapMemory(device, input_buffer_memory, 0, VK_WHOLE_SIZE, 0, &input_ptr);
+
+  uint32_t *data = (uint32_t *)input_ptr;
+  for (uint32_t i = 0; i != NUM_ELEMENTS; ++i) {
+    data[i] = 42;
+  }
+}
+
+void print_output_buffer() {
+  void *output_pointer;
+  vkMapMemory(device, output_buffer_memory, 0, VK_WHOLE_SIZE, 0,
+              &output_pointer);
+
+  uint32_t *data = (uint32_t *)output_pointer;
+  for (uint32_t i = 0; i != NUM_ELEMENTS; ++i) {
+    printf("%d ", data[i]);
+  }
+  printf("\n");
+}
+
+void execute_commands() {
+  VkFenceCreateInfo fence_info = {};
+  fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+  VkFence fence;
+  ERR(vkCreateFence(device, &fence_info, NULL, &fence),
+      "Could not create fence\n")
+
+  VkSubmitInfo submit_info = {};
+  submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit_info.commandBufferCount = 1;
+  submit_info.pCommandBuffers = &command_buffer;
+
+  ERR(vkQueueSubmit(queue, 1, &submit_info, fence), "Could not submit queue\n")
+
+  // 10 second timeout
+  ERR(vkWaitForFences(device, 1, &fence, VK_TRUE, 10000000000),
+      "Could not wait or timed out on fence\n")
+}
+
 void cleanup() {
+  vkDestroyDescriptorPool(device, descriptor_pool, NULL);
   vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
   vkDestroyShaderModule(device, shader_module, NULL);
+  vkDestroyPipelineLayout(device, pipeline_layout, NULL);
+  vkDestroyPipeline(device, compute_pipeline, NULL);
   vkFreeMemory(device, input_buffer_memory, NULL);
   vkFreeMemory(device, output_buffer_memory, NULL);
   vkFreeMemory(device, device_buffer_memory, NULL);
@@ -350,7 +511,13 @@ int main(void) {
   create_shader_module();
   create_descriptor_set_layout();
   allocate_descriptor_set();
+  write_descriptor_set();
   create_compute_pipeline();
+  allocate_command_buffers();
+  record_commands();
+  fill_input_buffer();
+  execute_commands();
+  print_output_buffer();
 
   cleanup();
 
