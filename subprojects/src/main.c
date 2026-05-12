@@ -35,11 +35,13 @@ VkDeviceMemory input_buffer_memory;
 VkDeviceMemory output_buffer_memory;
 VkDeviceMemory device_buffer_memory;
 VkShaderModule shader_module;
+VkDescriptorSetLayout descriptor_set_layout;
+VkPipelineLayout pipeline_layout;
+VkPipeline compute_pipeline;
 
-
-ShaderTuple read_shader(const char* path) {
+ShaderTuple read_shader(const char *path) {
   FILE *f = fopen(path, "rb");
-  if(!f) {
+  if (!f) {
     printf("Could not open file\n");
     exit(EXIT_FAILURE);
   }
@@ -49,7 +51,7 @@ ShaderTuple read_shader(const char* path) {
   fseek(f, 0, SEEK_SET);
 
   void *d = malloc(file_size);
-  if(!d) {
+  if (!d) {
     fclose(f);
     printf("Could not allocate enough memory for file\n");
     exit(EXIT_FAILURE);
@@ -58,7 +60,7 @@ ShaderTuple read_shader(const char* path) {
   size_t bytes_read = fread(d, 1, file_size, f);
   fclose(f);
 
-  ShaderTuple tuple = {(uint32_t *) d, bytes_read};
+  ShaderTuple tuple = {(uint32_t *)d, bytes_read};
   return tuple;
 }
 
@@ -110,7 +112,7 @@ void select_queue_family_index() {
       break;
     }
   }
-  if(queue_index == UINT32_MAX) {
+  if (queue_index == UINT32_MAX) {
     printf("Failed to find appropriate queue family index\n");
     exit(EXIT_FAILURE);
   }
@@ -130,8 +132,9 @@ void create_device() {
   info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
   info.queueCreateInfoCount = 1;
   info.pQueueCreateInfos = &queue_info;
-  
-  ERR(vkCreateDevice(physical_device, &info, NULL, &device), "Could not create device\n")
+
+  ERR(vkCreateDevice(physical_device, &info, NULL, &device),
+      "Could not create device\n")
 
   vkGetDeviceQueue(device, queue_index, 0, &queue);
 }
@@ -188,7 +191,7 @@ void allocate_memory() {
       break;
     }
   }
-  if(input_mem_index == UINT32_MAX) {
+  if (input_mem_index == UINT32_MAX) {
     printf("Could not find appropriate memory index for input buffer\n");
     exit(EXIT_FAILURE);
   }
@@ -207,7 +210,7 @@ void allocate_memory() {
       break;
     }
   }
-  if(output_mem_index == UINT32_MAX) {
+  if (output_mem_index == UINT32_MAX) {
     printf("Could not find appropriate memory for output buffer\n");
     exit(EXIT_FAILURE);
   }
@@ -226,7 +229,7 @@ void allocate_memory() {
       break;
     }
   }
-  if(device_mem_index == UINT32_MAX) {
+  if (device_mem_index == UINT32_MAX) {
     printf("Could not find appropriate memory for device buffer\n");
     exit(EXIT_FAILURE);
   }
@@ -235,25 +238,31 @@ void allocate_memory() {
   i_buffer_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   i_buffer_info.memoryTypeIndex = input_mem_index;
   i_buffer_info.allocationSize = i_buffer_requirements.size;
-  ERR(vkAllocateMemory(device, &i_buffer_info, NULL, &input_buffer_memory), "Could not allocate memory for input buffer\n")
+  ERR(vkAllocateMemory(device, &i_buffer_info, NULL, &input_buffer_memory),
+      "Could not allocate memory for input buffer\n")
 
   VkMemoryAllocateInfo o_buffer_info = {};
   o_buffer_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   o_buffer_info.memoryTypeIndex = output_mem_index;
   o_buffer_info.allocationSize = o_buffer_requirements.size;
-  ERR(vkAllocateMemory(device, &o_buffer_info, NULL, &output_buffer_memory), "Could not allocate memory for output buffer\n")
-  
+  ERR(vkAllocateMemory(device, &o_buffer_info, NULL, &output_buffer_memory),
+      "Could not allocate memory for output buffer\n")
+
   VkMemoryAllocateInfo d_buffer_info = {};
   d_buffer_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   d_buffer_info.memoryTypeIndex = device_mem_index;
   d_buffer_info.allocationSize = d_buffer_requirements.size;
-  ERR(vkAllocateMemory(device, &d_buffer_info, NULL, &device_buffer_memory), "Could not allocate memory for device buffer\n")
+  ERR(vkAllocateMemory(device, &d_buffer_info, NULL, &device_buffer_memory),
+      "Could not allocate memory for device buffer\n")
 }
 
 void bind_memory() {
-  ERR(vkBindBufferMemory(device, input_buffer, input_buffer_memory, 0), "Could not bind memory for input buffer\n")
-  ERR(vkBindBufferMemory(device, output_buffer, output_buffer_memory, 0), "Could not bind memory for output buffer\n")
-  ERR(vkBindBufferMemory(device, device_buffer, device_buffer_memory, 0), "Could not bind memory for device buffer\n")
+  ERR(vkBindBufferMemory(device, input_buffer, input_buffer_memory, 0),
+      "Could not bind memory for input buffer\n")
+  ERR(vkBindBufferMemory(device, output_buffer, output_buffer_memory, 0),
+      "Could not bind memory for output buffer\n")
+  ERR(vkBindBufferMemory(device, device_buffer, device_buffer_memory, 0),
+      "Could not bind memory for device buffer\n")
 }
 
 void create_shader_module() {
@@ -264,11 +273,61 @@ void create_shader_module() {
   info.codeSize = t.code_size;
   info.pCode = t.code;
 
-  ERR(vkCreateShaderModule(device, &info, NULL, &shader_module), "Could not create shader module\n");
+  ERR(vkCreateShaderModule(device, &info, NULL, &shader_module),
+      "Could not create shader module\n");
   free(t.code);
 }
 
+void create_descriptor_set_layout() {
+  VkDescriptorSetLayoutBinding dset_layout = {};
+  dset_layout.binding = 0;
+  dset_layout.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  dset_layout.descriptorCount = 1;
+  dset_layout.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+  VkDescriptorSetLayoutCreateInfo layout_info = {};
+  layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  layout_info.bindingCount = 1;
+  layout_info.pBindings = &dset_layout;
+
+  ERR(vkCreateDescriptorSetLayout(device, &layout_info, NULL,
+                                  &descriptor_set_layout),
+      "Could not create descriptor set layout\n")
+}
+
+void allocate_descriptor_set() {
+  printf("TODO\n");
+  exit(EXIT_FAILURE);
+}
+
+void create_compute_pipeline() {
+  VkPipelineLayoutCreateInfo pipeline_layout_info = {};
+  pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  pipeline_layout_info.setLayoutCount = 1;
+  pipeline_layout_info.pSetLayouts = &descriptor_set_layout;
+
+  ERR(vkCreatePipelineLayout(device, &pipeline_layout_info, NULL,
+                             &pipeline_layout),
+      "Could not create pipeline layout\n");
+
+  VkPipelineShaderStageCreateInfo shader_stage_info = {};
+  shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  shader_stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  shader_stage_info.module = shader_module;
+  shader_stage_info.pName = "main"; // Careful hardcoded
+
+  VkComputePipelineCreateInfo compute_pipeline_info = {};
+  compute_pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+  compute_pipeline_info.stage = shader_stage_info;
+  compute_pipeline_info.layout = pipeline_layout;
+
+  ERR(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1,
+                               &compute_pipeline_info, NULL, &compute_pipeline),
+      "Could not create compute pipeline\n")
+}
+
 void cleanup() {
+  vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
   vkDestroyShaderModule(device, shader_module, NULL);
   vkFreeMemory(device, input_buffer_memory, NULL);
   vkFreeMemory(device, output_buffer_memory, NULL);
@@ -289,6 +348,9 @@ int main(void) {
   allocate_memory();
   bind_memory();
   create_shader_module();
+  create_descriptor_set_layout();
+  allocate_descriptor_set();
+  create_compute_pipeline();
 
   cleanup();
 
