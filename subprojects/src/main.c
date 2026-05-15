@@ -110,8 +110,8 @@ void select_queue_family_index() {
   vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, properties);
 
   for (uint32_t i = 0; i != count; ++i) {
-    if (properties[i].queueFlags &
-        (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)) {
+    if (properties[i].queueFlags & VK_QUEUE_COMPUTE_BIT &&
+        properties[i].queueFlags & VK_QUEUE_TRANSFER_BIT) {
       queue_index = i;
       break;
     }
